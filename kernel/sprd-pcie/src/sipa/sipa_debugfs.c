@@ -6,6 +6,7 @@
 #include <linux/seq_file.h>
 #include <linux/regmap.h>
 #include <linux/dma-mapping.h>
+#include <linux/capability.h>
 #include <uapi/linux/swab.h>
 
 #include "../include/sipa.h"
@@ -14,6 +15,45 @@
 
 static u32 debug_cmd[5], data_buf[5];
 static struct sipa_node_description_tag ipa_node;
+
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
+#define SIPA_DEBUGFS_RW_MODE 0600
+#else
+#define SIPA_DEBUGFS_RW_MODE 0400
+#endif
+#define SIPA_DEBUGFS_RO_MODE 0400
+
+static bool sipa_reg_offset_valid(struct sipa_core *ipa, u32 offset)
+{
+	if (!ipa || !ipa->virt_reg_addr || !ipa->reg_res)
+		return false;
+	if (offset & 0x3)
+		return false;
+	if (resource_size(ipa->reg_res) < sizeof(u32))
+		return false;
+
+	return offset <= resource_size(ipa->reg_res) - sizeof(u32);
+}
+
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
+static int sipa_copy_debugfs_input(const char __user *buf, size_t size,
+				   char *data_buf, size_t data_buf_size)
+{
+	size_t len;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!size || size >= data_buf_size)
+		return -EINVAL;
+
+	len = min(size, data_buf_size - 1);
+	if (copy_from_user(data_buf, buf, len))
+		return -EFAULT;
+	data_buf[len] = '\0';
+
+	return 0;
+}
+#endif
 
 static int sipa_params_debug_show(struct seq_file *s, void *unused)
 {
@@ -145,21 +185,25 @@ static int sipa_params_debug_open(struct inode *inode, struct file *file)
 	return single_open(file, sipa_params_debug_show, inode->i_private);
 }
 
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 static ssize_t sipa_endian_debug_write(struct file *f, const char __user *buf,
 				       size_t size, loff_t *l)
 {
-	ssize_t len;
+	int ret;
 	u32 debug_cmd[24], data_buf[24];
 
-	len = min(size, sizeof(data_buf) - 1);
-	if (copy_from_user((char *)data_buf, buf, len))
-		return -EFAULT;
+	ret = sipa_copy_debugfs_input(buf, size, (char *)data_buf,
+				      sizeof(data_buf));
+	if (ret)
+		return ret;
 
-	len = sscanf((char *)data_buf, "%x %x %x %x %x %x %x %x %x %x %x %x\n",
+	ret = sscanf((char *)data_buf, "%x %x %x %x %x %x %x %x %x %x %x %x\n",
 		     &debug_cmd[0], &debug_cmd[1], &debug_cmd[2], &debug_cmd[3],
 		     &debug_cmd[4], &debug_cmd[5], &debug_cmd[6], &debug_cmd[7],
 		     &debug_cmd[8], &debug_cmd[9], &debug_cmd[10],
 		     &debug_cmd[11]);
+	if (ret != 12)
+		return -EINVAL;
 
 	ipa_node.address = debug_cmd[0];
 	ipa_node.length = debug_cmd[1];
@@ -176,6 +220,7 @@ static ssize_t sipa_endian_debug_write(struct file *f, const char __user *buf,
 
 	return size;
 }
+#endif
 
 static int sipa_endian_debug_show(struct seq_file *s, void *unused)
 {
@@ -220,27 +265,33 @@ static const struct file_operations sipa_endian_fops = {
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 	.write = sipa_endian_debug_write,
+#endif
 };
 
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 static ssize_t sipa_get_node_debug_write(struct file *f, const char __user *buf,
 					 size_t size, loff_t *l)
 {
 	int i;
-	ssize_t len;
+	int ret;
 	u8 debug_cmd[16], data_buf[128];
 
-	len = min(size, sizeof(data_buf) - 1);
-	if (copy_from_user((char *)data_buf, buf, len))
-		return -EFAULT;
+	ret = sipa_copy_debugfs_input(buf, size, (char *)data_buf,
+				      sizeof(data_buf));
+	if (ret)
+		return ret;
 
-	len = sscanf(
+	ret = sscanf(
 		(char *)data_buf,
 		"%4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx %4hhx\n",
 		&debug_cmd[0], &debug_cmd[1], &debug_cmd[2], &debug_cmd[3],
 		&debug_cmd[4], &debug_cmd[5], &debug_cmd[6], &debug_cmd[7],
 		&debug_cmd[8], &debug_cmd[9], &debug_cmd[10], &debug_cmd[11],
 		&debug_cmd[12], &debug_cmd[13], &debug_cmd[14], &debug_cmd[15]);
+	if (ret != 16)
+		return -EINVAL;
 
 	for (i = 0; i < 16; i++)
 		pr_err("0x%x ", debug_cmd[i]);
@@ -260,6 +311,7 @@ static ssize_t sipa_get_node_debug_write(struct file *f, const char __user *buf,
 #endif
 	return size;
 }
+#endif
 
 static int sipa_get_node_debug_show(struct seq_file *s, void *unused)
 {
@@ -297,24 +349,30 @@ static const struct file_operations sipa_get_node_fops = {
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 	.write = sipa_get_node_debug_write,
+#endif
 };
 
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 static ssize_t sipa_set_node_debug_write(struct file *f, const char __user *buf,
 					 size_t size, loff_t *l)
 {
-	ssize_t len;
+	int ret;
 	u32 debug_cmd[24], data_buf[24];
 
-	len = min(size, sizeof(data_buf) - 1);
-	if (copy_from_user((char *)data_buf, buf, len))
-		return -EFAULT;
+	ret = sipa_copy_debugfs_input(buf, size, (char *)data_buf,
+				      sizeof(data_buf));
+	if (ret)
+		return ret;
 
-	len = sscanf((char *)data_buf, "%x %x %x %x %x %x %x %x %x %x %x %x\n",
+	ret = sscanf((char *)data_buf, "%x %x %x %x %x %x %x %x %x %x %x %x\n",
 		     &debug_cmd[0], &debug_cmd[1], &debug_cmd[2], &debug_cmd[3],
 		     &debug_cmd[4], &debug_cmd[5], &debug_cmd[6], &debug_cmd[7],
 		     &debug_cmd[8], &debug_cmd[9], &debug_cmd[10],
 		     &debug_cmd[11]);
+	if (ret != 12)
+		return -EINVAL;
 
 	ipa_node.address = debug_cmd[0];
 	ipa_node.length = debug_cmd[1];
@@ -331,6 +389,7 @@ static ssize_t sipa_set_node_debug_write(struct file *f, const char __user *buf,
 
 	return size;
 }
+#endif
 
 static int sipa_set_node_debug_show(struct seq_file *s, void *unused)
 {
@@ -372,33 +431,48 @@ static const struct file_operations sipa_set_node_fops = {
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 	.write = sipa_set_node_debug_write,
+#endif
 };
 
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 static ssize_t sipa_reg_debug_write(struct file *f, const char __user *buf,
 				    size_t size, loff_t *l)
 {
-	ssize_t len;
+	int ret;
 	struct sipa_core *ipa = f->f_inode->i_private;
 
-	len = min(size, sizeof(data_buf) - 1);
-	if (copy_from_user((char *)data_buf, buf, len))
-		return -EFAULT;
+	ret = sipa_copy_debugfs_input(buf, size, (char *)data_buf,
+				      sizeof(data_buf));
+	if (ret)
+		return ret;
 
-	len = sscanf((char *)data_buf, "%x %x %x %x %x\n", &debug_cmd[0],
+	ret = sscanf((char *)data_buf, "%x %x %x %x %x\n", &debug_cmd[0],
 		     &debug_cmd[1], &debug_cmd[2], &debug_cmd[3],
 		     &debug_cmd[4]);
+	if (ret < 3)
+		return -EINVAL;
+	if (!sipa_reg_offset_valid(ipa, debug_cmd[0]))
+		return -EINVAL;
+
 	if (debug_cmd[2])
 		writel_relaxed(debug_cmd[1], ipa->virt_reg_addr + debug_cmd[0]);
 
 	return size;
 }
+#endif
 
 static int sipa_reg_debug_show(struct seq_file *s, void *unused)
 {
 	u32 tx_filled, rx_filled;
 	u32 tx_wr, tx_rd, rx_wr, rx_rd;
 	struct sipa_core *ipa = (struct sipa_core *)s->private;
+
+	if (!sipa_reg_offset_valid(ipa, debug_cmd[0])) {
+		seq_puts(s, "invalid register offset\n");
+		return 0;
+	}
 
 	seq_printf(s, "0x%x\n",
 		   readl_relaxed(ipa->virt_reg_addr + debug_cmd[0]));
@@ -467,13 +541,18 @@ static const struct file_operations sipa_reg_debug_fops = {
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 	.write = sipa_reg_debug_write,
+#endif
 };
 
 static int sipa_send_test_show(struct seq_file *s, void *unused)
 {
 	struct sk_buff *skb = NULL;
 	struct sipa_core *ipa = (struct sipa_core *)s->private;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (!skb) {
 		skb = __dev_alloc_skb(256, GFP_KERNEL | GFP_NOWAIT);
@@ -502,18 +581,25 @@ static const struct file_operations sipa_send_test_fops = {
 	.release = single_release,
 };
 
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 static ssize_t sipa_nic_debug_write(struct file *f, const char __user *buf,
 				    size_t size, loff_t *l)
 {
-	ssize_t len;
+	int ret;
 	u8 debug_cmd[24], data_buf[24];
 
-	len = min(size, sizeof(data_buf) - 1);
-	if (copy_from_user((char *)data_buf, buf, len))
-		return -EFAULT;
+	ret = sipa_copy_debugfs_input(buf, size, (char *)data_buf,
+				      sizeof(data_buf));
+	if (ret)
+		return ret;
 
-	len = sscanf((char *)data_buf, "%4hhx %4hhx\n", &debug_cmd[0],
+	ret = sscanf((char *)data_buf, "%4hhx %4hhx\n", &debug_cmd[0],
 		     &debug_cmd[1]);
+	if (ret != 2)
+		return -EINVAL;
+	if (debug_cmd[0] >= SIPA_NIC_MAX)
+		return -EINVAL;
+
 	if (debug_cmd[1])
 		sipa_nic_open(debug_cmd[0], 0, NULL, NULL);
 	else
@@ -521,6 +607,7 @@ static ssize_t sipa_nic_debug_write(struct file *f, const char __user *buf,
 
 	return size;
 }
+#endif
 
 static int sipa_nic_debug_show(struct seq_file *s, void *unused)
 {
@@ -562,7 +649,9 @@ static const struct file_operations sipa_nic_debug_fops = {
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
+#ifdef SIPA_ENABLE_DEBUGFS_WRITE
 	.write = sipa_nic_debug_write,
+#endif
 };
 
 int sipa_init_debugfs(struct sipa_core *ipa)
@@ -576,7 +665,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("params", 0444, root, ipa,
+	file = debugfs_create_file("params", SIPA_DEBUGFS_RO_MODE, root, ipa,
 				   &sipa_params_fops);
 	if (!file) {
 		dev_err(ipa->dev, "sipa create params file debugfs fail\n");
@@ -584,7 +673,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("endian", 0444, root, ipa,
+	file = debugfs_create_file("endian", SIPA_DEBUGFS_RW_MODE, root, ipa,
 				   &sipa_endian_fops);
 	if (!file) {
 		dev_err(ipa->dev, "sipa create endian file debugfs fail\n");
@@ -592,7 +681,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("get_node", 0444, root, ipa,
+	file = debugfs_create_file("get_node", SIPA_DEBUGFS_RW_MODE, root, ipa,
 				   &sipa_get_node_fops);
 	if (!file) {
 		dev_err(ipa->dev, "sipa create endian file debugfs fail\n");
@@ -600,7 +689,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("set_node", 0444, root, ipa,
+	file = debugfs_create_file("set_node", SIPA_DEBUGFS_RW_MODE, root, ipa,
 				   &sipa_set_node_fops);
 	if (!file) {
 		dev_err(ipa->dev, "sipa create set node file debugfs fail\n");
@@ -608,7 +697,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("reg", 0444, root, ipa,
+	file = debugfs_create_file("reg", SIPA_DEBUGFS_RW_MODE, root, ipa,
 				   &sipa_reg_debug_fops);
 	if (!file) {
 		dev_err(ipa->dev, "sipa create reg debug file debugfs fail\n");
@@ -616,7 +705,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("send_test", 0444, root, ipa,
+	file = debugfs_create_file("send_test", SIPA_DEBUGFS_RO_MODE, root, ipa,
 				   &sipa_send_test_fops);
 	if (!file) {
 		dev_err(ipa->dev,
@@ -625,7 +714,7 @@ int sipa_init_debugfs(struct sipa_core *ipa)
 		return -ENOMEM;
 	}
 
-	file = debugfs_create_file("nic", 0444, root, ipa,
+	file = debugfs_create_file("nic", SIPA_DEBUGFS_RW_MODE, root, ipa,
 				   &sipa_nic_debug_fops);
 	if (!file) {
 		dev_err(ipa->dev, "sipa create nic debug file debugfs fail\n");

@@ -490,12 +490,19 @@ static ssize_t modem_ctrl_write(struct file *filp, const char __user *buf,
 	if (!mcd_dev)
 		return -EINVAL;
 
+	if (!count || count >= sizeof(sbuf))
+		return -EINVAL;
+
 	if (unalign_copy_from_user((void *)sbuf, buf, count)) {
-		dev_err(mcd_dev->dev, "copy buf %s error\n", buf);
+		dev_err(mcd_dev->dev, "copy user buffer error\n");
 		return -EFAULT;
 	}
+
+	sbuf[count] = '\0';
+	if (sbuf[count - 1] == '\n')
+		sbuf[count - 1] = '\0';
+
 	dev_dbg(mcd_dev->dev, "get info:%s", sbuf);
-	sbuf[count - 1] = '\0';
 	ret = kstrtouint(sbuf, 10, &mcd_cmd);
 	if (ret) {
 		dev_err(mcd_dev->dev, "Invalid input!\n");
